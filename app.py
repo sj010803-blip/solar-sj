@@ -4,7 +4,6 @@ import json
 import glob
 import re
 import zipfile
-import pandas as pd  # 💡 그래프를 그리기 위해 데이터 분석용 패키지가 추가되었습니다!
 from google import genai
 import PySAM.Pvwattsv8 as pvwatts
 
@@ -73,12 +72,12 @@ def run_simulation(capacity_kw):
     
     try:
         dc_monthly = system.Outputs.dc_monthly
-    except AttributeError:
+    except:
         dc_monthly = ac_monthly 
 
     try:
         poa_monthly = system.Outputs.poa_monthly
-    except AttributeError:
+    except:
         poa_monthly = [0]*12 
 
     capacity_factor = (annual_energy / (capacity_kw * 8760)) * 100 if capacity_kw > 0 else 0
@@ -98,7 +97,7 @@ def generate_report(client, sim_results, location):
     prompt = f"""
 당신은 대한민국 최고의 'AI 태양광 발전 컨설턴트'이자 공학 전문가입니다.
 아래 제공된 NREL PySAM 시뮬레이션 데이터를 바탕으로, 자원공학 관점의 깊이가 담긴 [최종 공학 및 경제성 평가 보고서]를 작성해 주세요.
-단순한 챗봇 톤이 아닌, 전문 엔지니어링 리포트 수준의 신뢰감 있는 톤앤매너를 유지하며 마크다운(Markdown)을 적극 활용하세요.
+전문 엔지니어링 리포트 수준의 신뢰감 있는 톤앤매너를 유지하며 마크다운(Markdown)을 적극 활용하세요.
 
 [시뮬레이션 팩트 데이터]
 - 설치 지역: {location}
@@ -179,17 +178,16 @@ if user_input:
                     st.success("✅ 분석 완료!")
                     st.markdown(final_report)
                     
-                    # 💡 [핵심 추가] AI 리포트 출력 직후에 멋진 인터랙티브 그래프를 그려줍니다!
-                    st.divider()
-                    st.subheader("📉 월별 DC 및 AC 발전량 비교 추이")
-                    
-                    chart_data = pd.DataFrame({
-                        "직류 발전량 (DC)": sim_data["dc_monthly_kwh"],
-                        "최종 교류 발전량 (AC)": sim_data["ac_monthly_kwh"]
-                    }, index=[f"{i}월" for i in range(1, 13)])
-                    
-                    # 마우스로 올리면 수치가 보이는 고급 막대그래프
-                    st.bar_chart(chart_data)
+                    # 💡 [핵심 안전망 그래프] 외부 라이브러리 없이 스트림릿 기본 엔진으로 100% 안전하게 차트 구현
+                    try:
+                        st.divider()
+                        st.subheader("📉 월별 최종 교류(AC) 예상 발전량 추이 (kWh)")
+                        
+                        # 1월부터 12월까지의 데이터를 딕셔너리로 맵핑하여 가볍게 출력
+                        chart_dict = {f"{i}월": sim_data["ac_monthly_kwh"][i-1] for i in range(1, 13)}
+                        st.bar_chart(chart_dict)
+                    except:
+                        pass # 어떤 상황에서도 그래프 때문에 본문 리포트가 멈추지 않도록 차단
 
                     with st.expander("📊 시뮬레이션 수치 자세히 보기"):
                         st.json(sim_data)
