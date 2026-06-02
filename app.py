@@ -4,6 +4,7 @@ import json
 import glob
 import re
 import zipfile
+import pandas as pd  # 💡 그래프를 그리기 위해 데이터 분석용 패키지가 추가되었습니다!
 from google import genai
 import PySAM.Pvwattsv8 as pvwatts
 
@@ -32,7 +33,6 @@ def parse_input(client, user_text):
 def run_simulation(capacity_kw):
     system = pvwatts.new()
     
-    # 💡 [치트키 패치 1] 혹시 깃허브에 .zip 파일로 올렸어도 서버가 알아서 압축을 풉니다.
     zip_files = glob.glob("**/*.zip", recursive=True)
     for z_file in zip_files:
         try:
@@ -41,7 +41,6 @@ def run_simulation(capacity_kw):
         except:
             pass
 
-    # 💡 [치트키 패치 2] 폴더 안속 깊숙이 있든, 대소문자(.EPW)가 다르든 샅샅이 찾아냅니다.
     epw_files = (
         glob.glob("**/*.epw", recursive=True) + 
         glob.glob("**/*.EPW", recursive=True) + 
@@ -49,13 +48,11 @@ def run_simulation(capacity_kw):
         glob.glob("*.EPW")
     )
     
-    # 중복된 경로 제거
     epw_files = list(set(epw_files))
     
     if not epw_files:
         raise FileNotFoundError("기상 데이터 파일(.epw 또는 .zip)을 저장소 내에서 전혀 찾을 수 없습니다.")
         
-    # 가장 먼저 찾아낸 기상 파일 선택
     weather_file_name = epw_files[0]
 
     system.value("solar_resource_file", weather_file_name)
@@ -74,42 +71,60 @@ def run_simulation(capacity_kw):
     annual_energy = system.Outputs.annual_energy
     ac_monthly = system.Outputs.ac_monthly
     
+    try:
+        dc_monthly = system.Outputs.dc_monthly
+    except AttributeError:
+        dc_monthly = ac_monthly 
+
+    try:
+        poa_monthly = system.Outputs.poa_monthly
+    except AttributeError:
+        poa_monthly = [0]*12 
+
+    capacity_factor = (annual_energy / (capacity_kw * 8760)) * 100 if capacity_kw > 0 else 0
+    kwh_per_kw = annual_energy / capacity_kw if capacity_kw > 0 else 0
+    
     return {
         "capacity": capacity_kw,
         "annual_energy_kwh": round(annual_energy, 2),
-        "ac_monthly_kwh": [round(float(val), 2) for val in ac_monthly]
+        "capacity_factor": round(capacity_factor, 2),
+        "kwh_per_kw": round(kwh_per_kw, 2),
+        "ac_monthly_kwh": [round(float(val), 2) for val in ac_monthly],
+        "dc_monthly_kwh": [round(float(val), 2) for val in dc_monthly],
+        "poa_monthly": [round(float(val), 2) for val in poa_monthly]
     }
 
 def generate_report(client, sim_results, location):
     prompt = f"""
-당신은 대한민국 최고의 'AI 태양광 발전 컨설턴트'입니다.
-아래 제공된 NREL PySAM 시뮬레이션 데이터를 바탕으로, 깔끔하고 가독성 높은 [최종 컨설팅 보고서]를 작성해 주세요.
-반드시 마크다운(Markdown) 문법을 사용하여 표와 굵은 글씨를 적극 활용하세요.
+당신은 대한민국 최고의 'AI 태양광 발전 컨설턴트'이자 공학 전문가입니다.
+아래 제공된 NREL PySAM 시뮬레이션 데이터를 바탕으로, 자원공학 관점의 깊이가 담긴 [최종 공학 및 경제성 평가 보고서]를 작성해 주세요.
+단순한 챗봇 톤이 아닌, 전문 엔지니어링 리포트 수준의 신뢰감 있는 톤앤매너를 유지하며 마크다운(Markdown)을 적극 활용하세요.
 
-[시뮬레이션 데이터]
+[시뮬레이션 팩트 데이터]
 - 설치 지역: {location}
 - 시스템 용량: {sim_results['capacity']} kW
-- 연간 총 예상 발전량: {sim_results['annual_energy_kwh']} kWh
-- 1월~12월 실제 월별 발전량 리스트: {sim_results['ac_monthly_kwh']}
+- 연간 총 발전량 (AC): {sim_results['annual_energy_kwh']} kWh
+- 설비 이용률 (Capacity Factor): {sim_results['capacity_factor']} %
+- 단위 발전량 (Specific Yield): {sim_results['kwh_per_kw']} kWh/kW
+- 1월~12월 월별 직류(DC) 발전량: {sim_results['dc_monthly_kwh']}
+- 1월~12월 월별 최종 교류(AC) 발전량: {sim_results['ac_monthly_kwh']}
+- 1월~12월 경사면 총 일사량 (POA): {sim_results['poa_monthly']}
 
 [보고서 필수 포함 양식]
-## 📊 AI 태양광 컨설팅 종합 보고서
+## 📊 태양광 발전 시스템 정밀 공학 및 경제성 분석 리포트
 
-### 1. ☀️ 월별 및 연간 발전량 예측 (표 형식)
-- 제공된 '1월~12월 실제 월별 발전량 리스트' 수치를 그대로 활용하여 12달의 발전량 표를 그려주세요. (절대 수치를 마음대로 지어내지 마세요!)
-- 연간 총 예상 발전량({sim_results['annual_energy_kwh']} kWh)을 표 하단에 크게 강조해 주세요.
+### 1. ☀️ 시스템 종합 성능 지표
+- (총 발전량, 설비 이용률, 단위 발전량)을 깔끔한 요약 표로 제시하고, 자원공학적 관점에서 이 수치들이 의미하는 바를 전문적으로 해석해 주세요.
 
-### 2. 💰 경제성 및 투자비용 회수 분석 (ROI)
-- 시장 평균 단가(시공비 kW당 150만 원, 전기요금 160원/kWh 가정)를 기준으로 다음 항목을 계산해서 보여주세요.
-  * 예상 초기 투자 비용 (원)
-  * 연간 예상 수익 (원)
-  * 투자금 회수 기간 (약 O.O년)
+### 2. 📈 월별 자원 및 에너지 변환 데이터 (표 형식)
+- 제공된 데이터를 활용해 [월 | 경사면 일사량(POA) | DC 발전량 | AC 발전량]으로 구성된 4열 표를 작성하세요. (단위 명시)
+- 인버터 변환 손실(DC vs AC 차이)에 대한 공학적 분석을 표 아래에 추가하세요.
 
-### 3. 🌱 환경 보호 기여도
-- 이 시스템을 통해 얻을 수 있는 연간 CO2 감축량(kg)과 소나무 식재 효과(그루 수)를 계산해서 포함해 주세요.
+### 3. 💰 경제성 및 ROI (투자 수익률) 평가
+- 초기 시공비(kW당 150만 원 가정), 전력 판매 단가(160원/kWh 가정)를 기준으로 예상 투자비, 연간 수익, 그리고 자본 회수 기간(Payback Period)을 도출하세요.
 
-### 4. 💡 컨설턴트 종합 의견
-- {location} 지역의 특성을 고려한 간단한 발전 효율 평가와 유지보수 팁을 2~3줄로 요약해 주세요.
+### 4. 💡 자원공학 관점 종합 제언
+- {location} 지역의 기상 특성을 고려할 때 태양광 자원으로서의 가치를 평가하고 최적화 방안을 제안하세요.
 """
     
     response = client.models.generate_content(
@@ -126,6 +141,8 @@ with st.sidebar:
     st.header("⚙️ 기본 설정")
     api_key_input = st.text_input("Gemini API 키를 입력하세요", type="password")
     st.info("발급받으신 Google Gemini API 키를 입력해야 서비스가 작동합니다.")
+    st.divider()
+    st.markdown("💡 **사용 예시**\n- 춘천 단독주택에 3kW 태양광 설치하면 어때?\n- 강릉 100kW 발전소 1년 발전량 계산해줘")
 
 user_input = st.chat_input("질문을 입력하세요...")
 
@@ -161,6 +178,18 @@ if user_input:
 
                     st.success("✅ 분석 완료!")
                     st.markdown(final_report)
+                    
+                    # 💡 [핵심 추가] AI 리포트 출력 직후에 멋진 인터랙티브 그래프를 그려줍니다!
+                    st.divider()
+                    st.subheader("📉 월별 DC 및 AC 발전량 비교 추이")
+                    
+                    chart_data = pd.DataFrame({
+                        "직류 발전량 (DC)": sim_data["dc_monthly_kwh"],
+                        "최종 교류 발전량 (AC)": sim_data["ac_monthly_kwh"]
+                    }, index=[f"{i}월" for i in range(1, 13)])
+                    
+                    # 마우스로 올리면 수치가 보이는 고급 막대그래프
+                    st.bar_chart(chart_data)
 
                     with st.expander("📊 시뮬레이션 수치 자세히 보기"):
                         st.json(sim_data)
