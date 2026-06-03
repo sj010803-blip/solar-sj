@@ -1,3 +1,6 @@
 streamlit
 google-genai
 NREL-PySAM
+pandas
+matplotlib
+seaborn
