@@ -77,7 +77,7 @@ def get_ai_analysis(client, parsed_location, capacity, results):
 ### 4. 💡 컨설턴트 종합 의견 (지역 특성 고려)
 """
     response = client.models.generate_content(
-        model='gemini-1.5-flash',
+        model='gemini-2.5-flash',
         contents=prompt,
     )
     return response.text
@@ -112,7 +112,7 @@ if user_input:
                     
                     try:
                         parse_prompt = f"'{user_input}'에서 지역명과 용량 숫자만 JSON 형식({{\"location\":\"지역\", \"capacity_kw\":숫자}})으로 추출해."
-                        parse_res = client.models.generate_content(model='gemini-1.5-flash', contents=parse_prompt)
+                        parse_res = client.models.generate_content(model='gemini-2.5-flash', contents=parse_prompt)
                         match = re.search(r'\{.*\}', parse_res.text, re.DOTALL)
                         if match:
                             data = json.loads(match.group(0))
