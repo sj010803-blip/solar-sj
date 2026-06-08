@@ -131,8 +131,13 @@ if user_input:
                         match = re.search(r'\{.*\}', parse_res.text, re.DOTALL)
                         if match:
                             data = json.loads(match.group(0))
-                            parsed_location = data.get("location", parsed_location)
-                            capacity_kw = float(data.get("capacity_kw", capacity_kw))
+                            loc = data.get("location")
+if loc:
+    parsed_location = loc
+
+cap = data.get("capacity_kw")
+if cap:
+    capacity_kw = float(cap)
                     except:
                         pass # 파싱 실패 시 기본값 사용
 
@@ -151,18 +156,30 @@ if user_input:
                     # 5. 시각화 (포스터 스타일의 고급 다중 막대그래프)
                     st.subheader(f"📉 {parsed_location} ({capacity_kw}kW) 월별 발전량 비교")
                     
-                    df_monthly = pd.DataFrame({
-                        '월': [f"{i}월" for i in range(1, 13)],
-                        'Base (수직)': baseline['ac_monthly_kwh'],
-                        'Copilot (AI최적)': optimized['ac_monthly_kwh']
-                    })
+                   df_monthly = pd.DataFrame({
+    'Month': [f"{i}" for i in range(1, 13)],
+    'Base Vertical': baseline['ac_monthly_kwh'],
+    'AI Optimized': optimized['ac_monthly_kwh']
+})
                     
                     fig, ax = plt.subplots(figsize=(10, 5))
-                    df_long = pd.melt(df_monthly, id_vars=['월'], value_vars=['Base (수직)', 'Copilot (AI최적)'],
-                                       var_name='설비 구분', value_name='예상 발전량 (kWh)')
+                   df_long = pd.melt(
+    df_monthly,
+    id_vars=['Month'],
+    value_vars=['Base Vertical', 'AI Optimized'],
+    var_name='System Type',
+    value_name='Energy Generation (kWh)'
+)
                     
-                    sns.barplot(x='월', y='예상 발전량 (kWh)', hue='설비 구분', data=df_long, palette=["#4A90E2", "#E74C3C"], ax=ax)
-                    ax.set_ylabel("연간 AC 발전량 (kWh)")
+                    sns.barplot(
+    x='Month',
+    y='Energy Generation (kWh)',
+    hue='System Type',
+    data=df_long,
+    palette=["#4A90E2", "#E74C3C"],
+    ax=ax
+)
+                    ax.set_ylabel("Monthly AC Energy (kWh)")
                     ax.yaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}')) 
                     
                     st.pyplot(fig) # Streamlit 웹 화면에 그래프 띄우기
