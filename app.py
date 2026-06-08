@@ -20,7 +20,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# Streamlit Cloud에는 한글 폰트가 없을 수 있으므로 그래프 내부 라벨은 영어 사용
 plt.rcParams["font.family"] = "DejaVu Sans"
 
 
@@ -106,7 +105,39 @@ EPW_SOURCE_TEXT = "한국건축친환경설비학회(KIAEBS) 대한민국 표준
 
 
 # ============================================================
-# 4. 유틸리티 함수
+# 4. Gemini 안정화 설정
+# ============================================================
+
+GEMINI_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+]
+
+
+def generate_content_with_fallback(client, prompt):
+    """
+    Gemini 모델이 503 오류 등으로 실패할 경우,
+    여러 모델을 순차적으로 재시도하는 함수.
+    """
+    last_error = None
+
+    for model_name in GEMINI_MODELS:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            last_error = e
+            continue
+
+    raise last_error
+
+
+# ============================================================
+# 5. 유틸리티 함수
 # ============================================================
 
 def normalize_location(location_text):
@@ -259,7 +290,7 @@ def calculate_power_business_economics(
 
 
 # ============================================================
-# 5. PySAM 시뮬레이션 함수
+# 6. PySAM 시뮬레이션 함수
 # ============================================================
 
 def run_simulation(capacity, tilt, azimuth, location_name):
@@ -321,16 +352,37 @@ def optimize_design(capacity, location_name):
 
 
 # ============================================================
-# 6. LLM 관련 함수
+# 7. 사용자 입력 파싱 및 AI 보고서
 # ============================================================
 
-def parse_user_input_with_ai(client, user_input):
+def parse_user_input(client, user_input):
     """
-    Gemini를 이용해 사용자 질문에서 지역명과 용량을 추출.
-    실패하면 기본값을 사용한다.
+    사용자 질문에서 지역명과 용량을 추출.
+    1차: 규칙 기반 추출
+    2차: Gemini 사용
+    Gemini가 실패해도 기본값으로 작동한다.
     """
     parsed_location = "춘천"
     capacity_kw = 5.0
+
+    # 1. 지역명 규칙 기반 추출
+    for loc in WEATHER_FILES.keys():
+        if loc in user_input:
+            parsed_location = loc
+            break
+
+    # 2. 용량 정규식 추출
+    capacity_match = re.search(r"(\d+\.?\d*)\s*kW", user_input, re.IGNORECASE)
+    if capacity_match:
+        capacity_kw = float(capacity_match.group(1))
+
+    # 3. 규칙 기반으로 지역과 용량을 충분히 찾았다면 Gemini 호출 생략
+    if parsed_location != "춘천" or capacity_match:
+        return normalize_location(parsed_location), capacity_kw
+
+    # 4. Gemini가 있을 때만 추가 파싱 시도
+    if client is None:
+        return normalize_location(parsed_location), capacity_kw
 
     try:
         parse_prompt = f"""
@@ -348,12 +400,9 @@ def parse_user_input_with_ai(client, user_input):
 }}
 """
 
-        parse_res = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=parse_prompt
-        )
+        parse_text = generate_content_with_fallback(client, parse_prompt)
 
-        match = re.search(r"\{.*\}", parse_res.text, re.DOTALL)
+        match = re.search(r"\{.*\}", parse_text, re.DOTALL)
 
         if match:
             data = json.loads(match.group(0))
@@ -368,10 +417,6 @@ def parse_user_input_with_ai(client, user_input):
 
     except Exception:
         pass
-
-    capacity_match = re.search(r"(\d+\.?\d*)\s*kW", user_input, re.IGNORECASE)
-    if capacity_match:
-        capacity_kw = float(capacity_match.group(1))
 
     parsed_location = normalize_location(parsed_location)
 
@@ -472,16 +517,11 @@ def get_ai_analysis(
 - 과장하지 말고, 산정 조건과 한계를 함께 설명해 주세요.
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
-
-    return response.text
+    return generate_content_with_fallback(client, prompt)
 
 
 # ============================================================
-# 7. UI 구성
+# 8. UI 구성
 # ============================================================
 
 with st.sidebar:
@@ -492,7 +532,10 @@ with st.sidebar:
         type="password"
     )
 
-    st.info("발급받으신 Google Gemini API 키를 입력해야 서비스가 작동합니다.")
+    if api_key_input:
+        st.success("Gemini API 키가 입력되었습니다.")
+    else:
+        st.warning("API 키가 없어도 PySAM 계산은 가능하지만, AI 보고서는 생성되지 않습니다.")
 
     st.divider()
 
@@ -598,273 +641,295 @@ user_input = st.chat_input("질문을 입력하세요... (예: 춘천에 5kW 태
 
 
 # ============================================================
-# 8. 메인 실행
+# 9. 메인 실행
 # ============================================================
 
 if user_input:
     st.chat_message("user").write(user_input)
 
-    if not api_key_input:
-        st.error("왼쪽 메뉴에서 Gemini API 키를 먼저 입력해주세요.")
-    else:
-        with st.chat_message("assistant"):
-            with st.spinner("지역 EPW 선택, PySAM 시뮬레이션, 경제성 평가 및 AI 분석 중입니다..."):
-                try:
+    with st.chat_message("assistant"):
+        with st.spinner("지역 EPW 선택, PySAM 시뮬레이션, 경제성 평가를 수행 중입니다..."):
+            try:
+                client = None
+                if api_key_input:
                     client = genai.Client(api_key=api_key_input)
 
-                    parsed_location, capacity_kw = parse_user_input_with_ai(client, user_input)
+                # 1. 사용자 입력 파싱
+                parsed_location, capacity_kw = parse_user_input(client, user_input)
 
-                    sim_results = optimize_design(capacity_kw, parsed_location)
+                # 2. PySAM 시뮬레이션
+                sim_results = optimize_design(capacity_kw, parsed_location)
 
-                    baseline = next(
-                        (r for r in sim_results if r["Type"].startswith("Case 1")),
-                        sim_results[0]
+                baseline = next(
+                    (r for r in sim_results if r["Type"].startswith("Case 1")),
+                    sim_results[0]
+                )
+
+                optimized = max(
+                    sim_results,
+                    key=lambda x: x["annual_energy_kwh"]
+                )
+
+                used_location = optimized["location"]
+                used_epw_file = optimized["epw_file"]
+
+                improvement = (
+                    (optimized["annual_energy_kwh"] - baseline["annual_energy_kwh"])
+                    / baseline["annual_energy_kwh"]
+                    * 100
+                    if baseline["annual_energy_kwh"] > 0
+                    else 0
+                )
+
+                # 3. 경제성 계산
+                self_economics = None
+                business_economics = None
+
+                if analysis_mode == "자가소비형":
+                    self_economics = calculate_self_consumption_economics(
+                        monthly_generation_kwh=optimized["ac_monthly_kwh"],
+                        monthly_usage_kwh=monthly_usage_kwh,
+                        self_consumption_rate=self_consumption_rate,
+                        install_cost_per_kw=install_cost_per_kw,
+                        capacity_kw=capacity_kw,
+                        subsidy_per_kw=subsidy_per_kw
                     )
 
-                    optimized = max(
-                        sim_results,
-                        key=lambda x: x["annual_energy_kwh"]
+                    economic_inputs = {
+                        "monthly_usage_kwh": monthly_usage_kwh,
+                        "self_consumption_rate": self_consumption_rate,
+                        "install_cost_per_kw": install_cost_per_kw,
+                        "subsidy_per_kw": subsidy_per_kw,
+                        "smp_price": KPX_SMP_2025_LAND["annual_average"],
+                        "rec_price": REC_PRICE_REFERENCE["price"],
+                        "rec_weight": 1.0,
+                    }
+
+                else:
+                    business_economics = calculate_power_business_economics(
+                        annual_energy_kwh=optimized["annual_energy_kwh"],
+                        smp_price=smp_price,
+                        rec_price=rec_price,
+                        rec_weight=rec_weight,
+                        install_cost_per_kw=install_cost_per_kw,
+                        capacity_kw=capacity_kw
                     )
 
-                    used_location = optimized["location"]
-                    used_epw_file = optimized["epw_file"]
+                    economic_inputs = {
+                        "monthly_usage_kwh": 0,
+                        "self_consumption_rate": 0,
+                        "install_cost_per_kw": install_cost_per_kw,
+                        "subsidy_per_kw": 0,
+                        "smp_price": smp_price,
+                        "rec_price": rec_price,
+                        "rec_weight": rec_weight,
+                    }
 
-                    improvement = (
-                        (optimized["annual_energy_kwh"] - baseline["annual_energy_kwh"])
-                        / baseline["annual_energy_kwh"]
-                        * 100
-                        if baseline["annual_energy_kwh"] > 0
-                        else 0
+                # 4. AI 보고서 생성
+                if client is not None:
+                    try:
+                        final_report = get_ai_analysis(
+                            client=client,
+                            parsed_location=used_location,
+                            capacity=capacity_kw,
+                            results=sim_results,
+                            analysis_mode=analysis_mode,
+                            self_economics=self_economics,
+                            business_economics=business_economics,
+                            economic_inputs=economic_inputs
+                        )
+                        st.markdown(final_report)
+                    except Exception as ai_error:
+                        st.warning(
+                            "Gemini API가 일시적으로 응답하지 않아 AI 보고서는 생략했습니다. "
+                            "아래 PySAM 시뮬레이션 및 경제성 계산 결과는 정상적으로 표시됩니다."
+                        )
+                        st.caption(f"AI 오류 내용: {ai_error}")
+                else:
+                    st.warning(
+                        "Gemini API 키가 입력되지 않아 AI 보고서는 생략했습니다. "
+                        "아래 PySAM 시뮬레이션 및 경제성 계산 결과만 표시합니다."
                     )
 
-                    self_economics = None
-                    business_economics = None
+                st.divider()
 
-                    if analysis_mode == "자가소비형":
-                        self_economics = calculate_self_consumption_economics(
-                            monthly_generation_kwh=optimized["ac_monthly_kwh"],
-                            monthly_usage_kwh=monthly_usage_kwh,
-                            self_consumption_rate=self_consumption_rate,
-                            install_cost_per_kw=install_cost_per_kw,
-                            capacity_kw=capacity_kw,
-                            subsidy_per_kw=subsidy_per_kw
+                # 5. 핵심 지표 출력
+                if analysis_mode == "자가소비형":
+                    col1, col2, col3, col4 = st.columns(4)
+
+                    with col1:
+                        st.metric(
+                            "Optimized 발전량",
+                            f"{optimized['annual_energy_kwh']:,.0f} kWh/year"
                         )
 
-                        economic_inputs = {
-                            "monthly_usage_kwh": monthly_usage_kwh,
-                            "self_consumption_rate": self_consumption_rate,
-                            "install_cost_per_kw": install_cost_per_kw,
-                            "subsidy_per_kw": subsidy_per_kw,
-                            "smp_price": KPX_SMP_2025_LAND["annual_average"],
-                            "rec_price": REC_PRICE_REFERENCE["price"],
-                            "rec_weight": 1.0,
-                        }
-
-                    else:
-                        business_economics = calculate_power_business_economics(
-                            annual_energy_kwh=optimized["annual_energy_kwh"],
-                            smp_price=smp_price,
-                            rec_price=rec_price,
-                            rec_weight=rec_weight,
-                            install_cost_per_kw=install_cost_per_kw,
-                            capacity_kw=capacity_kw
+                    with col2:
+                        st.metric(
+                            "발전량 개선율",
+                            f"{improvement:.2f}%"
                         )
 
-                        economic_inputs = {
-                            "monthly_usage_kwh": 0,
-                            "self_consumption_rate": 0,
-                            "install_cost_per_kw": install_cost_per_kw,
-                            "subsidy_per_kw": 0,
-                            "smp_price": smp_price,
-                            "rec_price": rec_price,
-                            "rec_weight": rec_weight,
-                        }
+                    with col3:
+                        st.metric(
+                            "연간 절감액",
+                            f"{self_economics['annual_saving']:,.0f} 원/year"
+                        )
 
-                    final_report = get_ai_analysis(
-                        client=client,
-                        parsed_location=used_location,
-                        capacity=capacity_kw,
-                        results=sim_results,
-                        analysis_mode=analysis_mode,
-                        self_economics=self_economics,
-                        business_economics=business_economics,
-                        economic_inputs=economic_inputs
-                    )
+                    with col4:
+                        st.metric(
+                            "단순 회수기간",
+                            f"{self_economics['payback_year']:.1f} 년"
+                        )
 
-                    st.markdown(final_report)
-                    st.divider()
+                else:
+                    col1, col2, col3, col4 = st.columns(4)
 
-                    if analysis_mode == "자가소비형":
-                        col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric(
+                            "Optimized 발전량",
+                            f"{optimized['annual_energy_kwh']:,.0f} kWh/year"
+                        )
 
-                        with col1:
-                            st.metric(
-                                "Optimized 발전량",
-                                f"{optimized['annual_energy_kwh']:,.0f} kWh/year"
-                            )
+                    with col2:
+                        st.metric(
+                            "SMP 수익",
+                            f"{business_economics['smp_revenue']:,.0f} 원/year"
+                        )
 
-                        with col2:
-                            st.metric(
-                                "발전량 개선율",
-                                f"{improvement:.2f}%"
-                            )
+                    with col3:
+                        st.metric(
+                            "REC 수익",
+                            f"{business_economics['rec_revenue']:,.0f} 원/year"
+                        )
 
-                        with col3:
-                            st.metric(
-                                "연간 절감액",
-                                f"{self_economics['annual_saving']:,.0f} 원/year"
-                            )
+                    with col4:
+                        st.metric(
+                            "단순 회수기간",
+                            f"{business_economics['payback_year']:.1f} 년"
+                        )
 
-                        with col4:
-                            st.metric(
-                                "단순 회수기간",
-                                f"{self_economics['payback_year']:.1f} 년"
-                            )
+                st.info(f"선택된 지역: {used_location} / 사용 EPW 파일: {used_epw_file}")
 
-                    else:
-                        col1, col2, col3, col4 = st.columns(4)
+                # 6. 월별 발전량 그래프
+                st.subheader(f"📉 {used_location} ({capacity_kw}kW) 월별 발전량 비교")
 
-                        with col1:
-                            st.metric(
-                                "Optimized 발전량",
-                                f"{optimized['annual_energy_kwh']:,.0f} kWh/year"
-                            )
+                df_monthly = pd.DataFrame({
+                    "Month": [f"{i}" for i in range(1, 13)],
+                    "Base Vertical": baseline["ac_monthly_kwh"],
+                    "AI Optimized": optimized["ac_monthly_kwh"]
+                })
 
-                        with col2:
-                            st.metric(
-                                "SMP 수익",
-                                f"{business_economics['smp_revenue']:,.0f} 원/year"
-                            )
+                df_long = pd.melt(
+                    df_monthly,
+                    id_vars=["Month"],
+                    value_vars=["Base Vertical", "AI Optimized"],
+                    var_name="System Type",
+                    value_name="Energy Generation (kWh)"
+                )
 
-                        with col3:
-                            st.metric(
-                                "REC 수익",
-                                f"{business_economics['rec_revenue']:,.0f} 원/year"
-                            )
+                fig, ax = plt.subplots(figsize=(10, 5))
 
-                        with col4:
-                            st.metric(
-                                "단순 회수기간",
-                                f"{business_economics['payback_year']:.1f} 년"
-                            )
+                sns.barplot(
+                    x="Month",
+                    y="Energy Generation (kWh)",
+                    hue="System Type",
+                    data=df_long,
+                    palette=["#4A90E2", "#E74C3C"],
+                    ax=ax
+                )
 
-                    st.info(f"선택된 지역: {used_location} / 사용 EPW 파일: {used_epw_file}")
+                ax.set_xlabel("Month")
+                ax.set_ylabel("Monthly AC Energy (kWh)")
+                ax.set_title("Monthly PV Energy Generation Comparison")
+                ax.yaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
 
-                    st.subheader(f"📉 {used_location} ({capacity_kw}kW) 월별 발전량 비교")
+                st.pyplot(fig)
 
-                    df_monthly = pd.DataFrame({
-                        "Month": [f"{i}" for i in range(1, 13)],
-                        "Base Vertical": baseline["ac_monthly_kwh"],
-                        "AI Optimized": optimized["ac_monthly_kwh"]
+                # 7. 경사각별 발전량 그래프
+                st.subheader("📐 경사각별 연간 발전량 비교")
+
+                df_tilt = pd.DataFrame([
+                    {
+                        "Tilt": r["tilt"],
+                        "Annual Energy (kWh/year)": r["annual_energy_kwh"],
+                        "Type": r["Type"]
+                    }
+                    for r in sim_results
+                ])
+
+                fig2, ax2 = plt.subplots(figsize=(10, 5))
+
+                sns.barplot(
+                    x="Tilt",
+                    y="Annual Energy (kWh/year)",
+                    data=df_tilt,
+                    ax=ax2
+                )
+
+                ax2.set_xlabel("Tilt Angle (degree)")
+                ax2.set_ylabel("Annual AC Energy (kWh/year)")
+                ax2.set_title("Annual Energy by Tilt Angle")
+                ax2.yaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
+
+                st.pyplot(fig2)
+
+                # 8. 경제성 상세 표
+                st.subheader("💰 경제성 계산 상세")
+
+                if analysis_mode == "자가소비형":
+                    econ_df = pd.DataFrame({
+                        "항목": [
+                            "총 설치비",
+                            "보조금 반영액",
+                            "순 설치비",
+                            "설치 전 연간 전기요금",
+                            "설치 후 연간 전기요금",
+                            "연간 절감액",
+                            "연간 자가소비 발전량",
+                            "단순 회수기간"
+                        ],
+                        "값": [
+                            f"{self_economics['gross_install_cost']:,.0f} 원",
+                            f"{self_economics['total_subsidy']:,.0f} 원",
+                            f"{self_economics['net_install_cost']:,.0f} 원",
+                            f"{self_economics['annual_bill_before']:,.0f} 원/year",
+                            f"{self_economics['annual_bill_after']:,.0f} 원/year",
+                            f"{self_economics['annual_saving']:,.0f} 원/year",
+                            f"{self_economics['self_consumed_kwh']:,.0f} kWh/year",
+                            f"{self_economics['payback_year']:.1f} 년"
+                        ]
                     })
 
-                    df_long = pd.melt(
-                        df_monthly,
-                        id_vars=["Month"],
-                        value_vars=["Base Vertical", "AI Optimized"],
-                        var_name="System Type",
-                        value_name="Energy Generation (kWh)"
-                    )
+                else:
+                    econ_df = pd.DataFrame({
+                        "항목": [
+                            "총 설치비",
+                            "적용 SMP",
+                            "적용 REC 가격",
+                            "REC 가중치",
+                            "SMP 연간 수익",
+                            "REC 연간 수익",
+                            "연간 총수익",
+                            "단순 회수기간"
+                        ],
+                        "값": [
+                            f"{business_economics['gross_install_cost']:,.0f} 원",
+                            f"{smp_price:.2f} 원/kWh",
+                            f"{rec_price:,.0f} 원/REC",
+                            f"{rec_weight:.2f}",
+                            f"{business_economics['smp_revenue']:,.0f} 원/year",
+                            f"{business_economics['rec_revenue']:,.0f} 원/year",
+                            f"{business_economics['total_revenue']:,.0f} 원/year",
+                            f"{business_economics['payback_year']:.1f} 년"
+                        ]
+                    })
 
-                    fig, ax = plt.subplots(figsize=(10, 5))
+                st.dataframe(econ_df, use_container_width=True)
 
-                    sns.barplot(
-                        x="Month",
-                        y="Energy Generation (kWh)",
-                        hue="System Type",
-                        data=df_long,
-                        palette=["#4A90E2", "#E74C3C"],
-                        ax=ax
-                    )
+                # 9. 데이터 출처 및 한계
+                st.subheader("📚 데이터 출처 및 한계")
 
-                    ax.set_xlabel("Month")
-                    ax.set_ylabel("Monthly AC Energy (kWh)")
-                    ax.set_title("Monthly PV Energy Generation Comparison")
-                    ax.yaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
-
-                    st.pyplot(fig)
-
-                    st.subheader("📐 경사각별 연간 발전량 비교")
-
-                    df_tilt = pd.DataFrame([
-                        {
-                            "Tilt": r["tilt"],
-                            "Annual Energy (kWh/year)": r["annual_energy_kwh"],
-                            "Type": r["Type"]
-                        }
-                        for r in sim_results
-                    ])
-
-                    fig2, ax2 = plt.subplots(figsize=(10, 5))
-
-                    sns.barplot(
-                        x="Tilt",
-                        y="Annual Energy (kWh/year)",
-                        data=df_tilt,
-                        ax=ax2
-                    )
-
-                    ax2.set_xlabel("Tilt Angle (degree)")
-                    ax2.set_ylabel("Annual AC Energy (kWh/year)")
-                    ax2.set_title("Annual Energy by Tilt Angle")
-                    ax2.yaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
-
-                    st.pyplot(fig2)
-
-                    st.subheader("💰 경제성 계산 상세")
-
-                    if analysis_mode == "자가소비형":
-                        econ_df = pd.DataFrame({
-                            "항목": [
-                                "총 설치비",
-                                "보조금 반영액",
-                                "순 설치비",
-                                "설치 전 연간 전기요금",
-                                "설치 후 연간 전기요금",
-                                "연간 절감액",
-                                "연간 자가소비 발전량",
-                                "단순 회수기간"
-                            ],
-                            "값": [
-                                f"{self_economics['gross_install_cost']:,.0f} 원",
-                                f"{self_economics['total_subsidy']:,.0f} 원",
-                                f"{self_economics['net_install_cost']:,.0f} 원",
-                                f"{self_economics['annual_bill_before']:,.0f} 원/year",
-                                f"{self_economics['annual_bill_after']:,.0f} 원/year",
-                                f"{self_economics['annual_saving']:,.0f} 원/year",
-                                f"{self_economics['self_consumed_kwh']:,.0f} kWh/year",
-                                f"{self_economics['payback_year']:.1f} 년"
-                            ]
-                        })
-                    else:
-                        econ_df = pd.DataFrame({
-                            "항목": [
-                                "총 설치비",
-                                "적용 SMP",
-                                "적용 REC 가격",
-                                "REC 가중치",
-                                "SMP 연간 수익",
-                                "REC 연간 수익",
-                                "연간 총수익",
-                                "단순 회수기간"
-                            ],
-                            "값": [
-                                f"{business_economics['gross_install_cost']:,.0f} 원",
-                                f"{smp_price:.2f} 원/kWh",
-                                f"{rec_price:,.0f} 원/REC",
-                                f"{rec_weight:.2f}",
-                                f"{business_economics['smp_revenue']:,.0f} 원/year",
-                                f"{business_economics['rec_revenue']:,.0f} 원/year",
-                                f"{business_economics['total_revenue']:,.0f} 원/year",
-                                f"{business_economics['payback_year']:.1f} 년"
-                            ]
-                        })
-
-                    st.dataframe(econ_df, use_container_width=True)
-
-                    st.subheader("📚 데이터 출처 및 한계")
-
-                    st.markdown(f"""
+                st.markdown(f"""
 - **EPW 기상데이터**: {EPW_SOURCE_TEXT}
 - **전기요금**: {KEPCO_RESIDENTIAL_LOW_VOLTAGE["source"]}
 - **SMP**: {KPX_SMP_2025_LAND["source"]}, 코드 내 연평균 {KPX_SMP_2025_LAND["annual_average"]:.2f}원/kWh 적용
@@ -874,5 +939,5 @@ if user_input:
 주의: 본 결과는 PySAM PVWatts 모델과 EPW 기상데이터 기반 예측값입니다. 실제 발전량과 경제성은 음영, 모듈 성능, 인버터, 시공 품질, 유지관리, 계통 조건, 전기요금, SMP, REC 가격, 보조금 정책에 따라 달라질 수 있습니다.
 """)
 
-                except Exception as e:
-                    st.error(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
+            except Exception as e:
+                st.error(f"⚠️ 처리 중 오류가 발생했습니다: {e}")
