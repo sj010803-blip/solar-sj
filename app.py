@@ -15,29 +15,77 @@ st.set_page_config(page_title="AI 태양광 컨설턴트", page_icon="☀️", l
 
 
 # --- 그래프 폰트 설정 ---
-# Streamlit Cloud에는 한글 폰트가 없을 수 있으므로 그래프 내부 라벨은 영어로 표시
 plt.rcParams["font.family"] = "DejaVu Sans"
 
 
-# --- PySAM 시뮬레이션 함수 ---
-def run_simulation(capacity, tilt, azimuth):
-    """
-    실제 PySAM PVWatts를 사용해 태양광 발전량을 계산하는 함수
-    현재는 저장소에 업로드된 강릉 EPW 파일을 사용함
-    """
-    system = pvwatts.default("PVWattsNone")
+# --- 지역별 EPW 파일 매핑 ---
+WEATHER_FILES = {
+    "서울": "KOR_Seoul.epw",
+    "춘천": "KOR_Chuncheon.epw",
+    "강릉": "KOR_Kangnung.epw",
+    "부산": "KOR_Busan.epw",
+    "대전": "KOR_Daejeon.epw",
+    "광주": "KOR_Gwangju.epw",
+    "제주": "KOR_Jeju.epw",
+}
 
-    epw_path = os.path.join(os.path.dirname(__file__), "KOR_Kangnung.471050_IWEC.epw")
+
+def normalize_location(location_text):
+    """
+    사용자가 입력한 지역명에서 지원 가능한 대표 지역명을 찾는 함수
+    """
+    if not location_text:
+        return "춘천"
+
+    text = str(location_text).replace(" ", "")
+
+    location_keywords = {
+        "서울": ["서울", "서울시", "서울특별시"],
+        "춘천": ["춘천", "춘천시", "강원도춘천"],
+        "강릉": ["강릉", "강릉시", "강원도강릉", "강릉시"],
+        "부산": ["부산", "부산시", "부산광역시"],
+        "대전": ["대전", "대전시", "대전광역시"],
+        "광주": ["광주", "광주시", "광주광역시"],
+        "제주": ["제주", "제주시", "제주도", "제주특별자치도"],
+    }
+
+    for standard_name, keywords in location_keywords.items():
+        for keyword in keywords:
+            if keyword in text:
+                return standard_name
+
+    return "춘천"
+
+
+def get_weather_file(location_name):
+    """
+    지역명에 맞는 EPW 파일 경로를 반환하는 함수
+    """
+    standard_location = normalize_location(location_name)
+    file_name = WEATHER_FILES.get(standard_location, WEATHER_FILES["춘천"])
+    epw_path = os.path.join(os.path.dirname(__file__), file_name)
 
     if not os.path.exists(epw_path):
-        raise FileNotFoundError(f"EPW 파일을 찾을 수 없습니다: {epw_path}")
+        raise FileNotFoundError(
+            f"{standard_location} 지역의 EPW 파일을 찾을 수 없습니다: {file_name}"
+        )
 
-    # 기상 데이터 설정
+    return standard_location, epw_path, file_name
+
+
+# --- PySAM 시뮬레이션 함수 ---
+def run_simulation(capacity, tilt, azimuth, location_name):
+    """
+    PySAM PVWatts를 사용해 지역별 EPW 기상데이터 기반 태양광 발전량을 계산하는 함수
+    """
+    standard_location, epw_path, epw_file_name = get_weather_file(location_name)
+
+    system = pvwatts.default("PVWattsNone")
+
     system.SolarResource.assign({
         "solar_resource_file": epw_path
     })
 
-    # 태양광 시스템 설계 조건 설정
     system.SystemDesign.assign({
         "system_capacity": capacity,   # kW
         "module_type": 0,              # Standard module
@@ -50,13 +98,14 @@ def run_simulation(capacity, tilt, azimuth):
         "gcr": 0.4
     })
 
-    # 시뮬레이션 실행
     system.execute()
 
     annual = system.Outputs.ac_annual
     monthly = list(system.Outputs.ac_monthly)
 
     return {
+        "location": standard_location,
+        "epw_file": epw_file_name,
         "tilt": tilt,
         "azimuth": azimuth,
         "capacity": capacity,
@@ -65,20 +114,20 @@ def run_simulation(capacity, tilt, azimuth):
     }
 
 
-def optimize_design(capacity):
+def optimize_design(capacity, location_name):
     """
-    여러 경사각을 비교하여 최적 설계를 찾는 함수
+    기준 설계와 여러 경사각 후보를 비교하여 최적 설계를 찾는 함수
     """
     results = []
 
     # 기준선: 수직 설치
-    baseline = run_simulation(capacity, 90, 180)
+    baseline = run_simulation(capacity, 90, 180, location_name)
     baseline["Type"] = "Case 1: Baseline Vertical"
     results.append(baseline)
 
     # 최적화 후보
-    for t in [20, 30, 35]:
-        sim = run_simulation(capacity, t, 180)
+    for t in [15, 20, 25, 30, 35, 40]:
+        sim = run_simulation(capacity, t, 180, location_name)
         sim["Type"] = "Optimization Search"
         results.append(sim)
 
@@ -97,18 +146,22 @@ def get_ai_analysis(client, parsed_location, capacity, results):
         else 0
     )
 
+    installation_cost = capacity * 1_500_000
+    annual_saving = optimized["annual_energy_kwh"] * 160
+    payback_year = installation_cost / annual_saving if annual_saving > 0 else 0
+
     prompt = f"""
 당신은 대한민국 최고의 'AI 태양광 발전 컨설턴트'입니다.
 초보자도 쉽게 이해할 수 있으면서도, 공학적 깊이가 담긴 태양광 경제성 평가 보고서를 작성해 주세요.
 
 [시뮬레이션 조건]
 - 지역: {parsed_location}
-- 사용 기상 데이터: 강릉 EPW 기상 데이터
+- 사용 EPW 파일: {optimized["epw_file"]}
 - 시스템 용량: {capacity} kW
 - Baseline 조건: 수직 설치, 남향
 - Optimized 조건: 후보 경사각 중 최적 설계
 
-[시뮬레이션 결과]
+[PySAM PVWatts 시뮬레이션 결과]
 - Baseline 기준 발전량: {baseline["annual_energy_kwh"]:.2f} kWh/year
 - Optimized 최적 발전량: {optimized["annual_energy_kwh"]:.2f} kWh/year
 - 최적 경사각: {optimized["tilt"]}도
@@ -117,7 +170,10 @@ def get_ai_analysis(client, parsed_location, capacity, results):
 
 [경제성 가정]
 - 설치비: kW당 150만원
+- 총 설치비: {installation_cost:,.0f}원
 - 전기요금 절감 단가: 160원/kWh
+- 연간 예상 절감액: {annual_saving:,.0f}원
+- 단순 회수기간: {payback_year:.1f}년
 
 [보고서 양식]
 ### 1. ☀️ 시스템 종합 성능
@@ -127,7 +183,8 @@ def get_ai_analysis(client, parsed_location, capacity, results):
 ### 5. 💡 컨설턴트 종합 의견
 
 주의:
-- 현재 기상 데이터는 강릉 EPW 기준이므로, 사용자가 춘천/서울 등 다른 지역을 입력해도 실제 계산은 강릉 기상 조건임을 설명해 주세요.
+- 발전량은 PySAM PVWatts와 EPW 기상데이터 기반의 시뮬레이션 결과입니다.
+- 설치비, 전기요금, 보조금, 음영, 패널 효율, 실제 시공 조건에 따라 실제 경제성은 달라질 수 있음을 설명해 주세요.
 - 과장하지 말고, 추정값이라는 점을 명확히 말해 주세요.
 """
 
@@ -139,37 +196,16 @@ def get_ai_analysis(client, parsed_location, capacity, results):
     return response.text
 
 
-# --- UI 구성 ---
-with st.sidebar:
-    st.header("⚙️ 기본 설정")
-    api_key_input = st.text_input("Gemini API 키를 입력하세요", type="password")
-    st.info("발급받으신 Google Gemini API 키를 입력해야 서비스가 작동합니다.")
-    st.warning("현재 시뮬레이션은 저장소에 포함된 강릉 EPW 기상 데이터를 기준으로 계산됩니다.")
+def parse_user_input_with_ai(client, user_input):
+    """
+    Gemini를 이용해 사용자 질문에서 지역명과 용량을 추출
+    실패하면 기본값 사용
+    """
+    parsed_location = "춘천"
+    capacity_kw = 5.0
 
-st.title("☀️ SAM-Copilot 태양광 경제성 분석기")
-st.markdown("**PySAM PVWatts와 LLM을 결합하여 태양광 발전량과 경제성을 분석해 보세요.**")
-
-user_input = st.chat_input("질문을 입력하세요... (예: 춘천에 5kW 태양광 설치하면 어때?)")
-
-
-if user_input:
-    st.chat_message("user").write(user_input)
-
-    if not api_key_input:
-        st.error("왼쪽 메뉴에서 Gemini API 키를 먼저 입력해주세요.")
-    else:
-        with st.chat_message("assistant"):
-            with st.spinner("PySAM 시뮬레이션 및 AI 분석 중입니다..."):
-                try:
-                    client = genai.Client(api_key=api_key_input)
-
-                    # 기본값
-                    parsed_location = "강원도 춘천"
-                    capacity_kw = 5.0
-
-                    # 1. 사용자 입력에서 지역/용량 추출
-                    try:
-                        parse_prompt = f"""
+    try:
+        parse_prompt = f"""
 다음 사용자 문장에서 지역명과 태양광 설비 용량(kW)을 추출해 주세요.
 
 사용자 문장:
@@ -184,41 +220,101 @@ if user_input:
 }}
 """
 
-                        parse_res = client.models.generate_content(
-                            model="gemini-2.5-flash",
-                            contents=parse_prompt
-                        )
+        parse_res = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=parse_prompt
+        )
 
-                        match = re.search(r"\{.*\}", parse_res.text, re.DOTALL)
+        match = re.search(r"\{.*\}", parse_res.text, re.DOTALL)
 
-                        if match:
-                            data = json.loads(match.group(0))
+        if match:
+            data = json.loads(match.group(0))
 
-                            loc = data.get("location")
-                            if loc:
-                                parsed_location = loc
+            loc = data.get("location")
+            if loc:
+                parsed_location = loc
 
-                            cap = data.get("capacity_kw")
-                            if cap:
-                                capacity_kw = float(cap)
+            cap = data.get("capacity_kw")
+            if cap:
+                capacity_kw = float(cap)
 
-                    except Exception:
-                        pass
+    except Exception:
+        pass
+
+    # AI가 못 잡았을 경우를 대비한 간단한 정규식 보정
+    if capacity_kw == 5.0:
+        capacity_match = re.search(r"(\d+\.?\d*)\s*kW", user_input, re.IGNORECASE)
+        if capacity_match:
+            capacity_kw = float(capacity_match.group(1))
+
+    parsed_location = normalize_location(parsed_location)
+
+    return parsed_location, capacity_kw
+
+
+# --- UI 구성 ---
+with st.sidebar:
+    st.header("⚙️ 기본 설정")
+    api_key_input = st.text_input("Gemini API 키를 입력하세요", type="password")
+    st.info("발급받으신 Google Gemini API 키를 입력해야 서비스가 작동합니다.")
+
+    st.divider()
+    st.subheader("📍 지원 지역")
+    st.write(", ".join(WEATHER_FILES.keys()))
+
+    st.caption("사용자가 입력한 지역명에 따라 해당 EPW 기상데이터를 자동 선택합니다.")
+
+
+st.title("☀️ SAM-Copilot 태양광 경제성 분석기")
+st.markdown("**PySAM PVWatts와 LLM을 결합하여 지역별 태양광 발전량과 경제성을 분석해 보세요.**")
+
+user_input = st.chat_input("질문을 입력하세요... (예: 춘천에 5kW 태양광 설치하면 어때?)")
+
+
+if user_input:
+    st.chat_message("user").write(user_input)
+
+    if not api_key_input:
+        st.error("왼쪽 메뉴에서 Gemini API 키를 먼저 입력해주세요.")
+    else:
+        with st.chat_message("assistant"):
+            with st.spinner("지역 EPW 선택, PySAM 시뮬레이션 및 AI 분석 중입니다..."):
+                try:
+                    client = genai.Client(api_key=api_key_input)
+
+                    # 1. 사용자 입력에서 지역/용량 추출
+                    parsed_location, capacity_kw = parse_user_input_with_ai(client, user_input)
 
                     # 2. PySAM 시뮬레이션
-                    sim_results = optimize_design(capacity_kw)
+                    sim_results = optimize_design(capacity_kw, parsed_location)
                     baseline = next((r for r in sim_results if r["Type"].startswith("Case 1")), sim_results[0])
                     optimized = max(sim_results, key=lambda x: x["annual_energy_kwh"])
 
+                    # 실제 사용된 지역 및 EPW 파일
+                    used_location = optimized["location"]
+                    used_epw_file = optimized["epw_file"]
+
                     # 3. AI 분석 보고서
-                    final_report = get_ai_analysis(client, parsed_location, capacity_kw, sim_results)
+                    final_report = get_ai_analysis(client, used_location, capacity_kw, sim_results)
 
                     # 4. 결과 출력
                     st.markdown(final_report)
                     st.divider()
 
                     # 5. 수치 요약
-                    col1, col2, col3 = st.columns(3)
+                    improvement = (
+                        (optimized["annual_energy_kwh"] - baseline["annual_energy_kwh"])
+                        / baseline["annual_energy_kwh"]
+                        * 100
+                        if baseline["annual_energy_kwh"] > 0
+                        else 0
+                    )
+
+                    installation_cost = capacity_kw * 1_500_000
+                    annual_saving = optimized["annual_energy_kwh"] * 160
+                    payback_year = installation_cost / annual_saving if annual_saving > 0 else 0
+
+                    col1, col2, col3, col4 = st.columns(4)
 
                     with col1:
                         st.metric(
@@ -233,20 +329,21 @@ if user_input:
                         )
 
                     with col3:
-                        improvement = (
-                            (optimized["annual_energy_kwh"] - baseline["annual_energy_kwh"])
-                            / baseline["annual_energy_kwh"]
-                            * 100
-                            if baseline["annual_energy_kwh"] > 0
-                            else 0
-                        )
                         st.metric(
                             "발전량 개선율",
                             f"{improvement:.2f}%"
                         )
 
+                    with col4:
+                        st.metric(
+                            "단순 회수기간",
+                            f"{payback_year:.1f}년"
+                        )
+
+                    st.info(f"선택된 지역: {used_location} / 사용 EPW 파일: {used_epw_file}")
+
                     # 6. 월별 발전량 그래프
-                    st.subheader(f"📉 {parsed_location} ({capacity_kw}kW) 월별 발전량 비교")
+                    st.subheader(f"📉 {used_location} ({capacity_kw}kW) 월별 발전량 비교")
 
                     df_monthly = pd.DataFrame({
                         "Month": [f"{i}" for i in range(1, 13)],
@@ -280,10 +377,38 @@ if user_input:
 
                     st.pyplot(fig)
 
-                    # 7. 현재 한계 안내
-                    st.info(
-                        "현재 버전은 저장소에 포함된 강릉 EPW 기상 데이터를 기준으로 PySAM PVWatts 시뮬레이션을 수행합니다. "
-                        "정확한 지역별 분석을 위해서는 춘천, 서울, 부산 등 지역별 EPW 파일을 추가하고 지역 선택 로직을 확장해야 합니다."
+                    # 7. 경사각별 연간 발전량 비교
+                    st.subheader("📐 경사각별 연간 발전량 비교")
+
+                    df_tilt = pd.DataFrame([
+                        {
+                            "Tilt": r["tilt"],
+                            "Annual Energy (kWh/year)": r["annual_energy_kwh"],
+                            "Type": r["Type"]
+                        }
+                        for r in sim_results
+                    ])
+
+                    fig2, ax2 = plt.subplots(figsize=(10, 5))
+
+                    sns.barplot(
+                        x="Tilt",
+                        y="Annual Energy (kWh/year)",
+                        data=df_tilt,
+                        ax=ax2
+                    )
+
+                    ax2.set_xlabel("Tilt Angle (degree)")
+                    ax2.set_ylabel("Annual AC Energy (kWh/year)")
+                    ax2.set_title("Annual Energy by Tilt Angle")
+                    ax2.yaxis.set_major_formatter(ticker.StrMethodFormatter("{x:,.0f}"))
+
+                    st.pyplot(fig2)
+
+                    # 8. 현재 한계 안내
+                    st.warning(
+                        "본 결과는 PySAM PVWatts 모델과 EPW 기상데이터를 기반으로 한 예측값입니다. "
+                        "실제 발전량은 음영, 모듈 성능, 인버터, 시공 품질, 유지관리, 계통 조건 등에 따라 달라질 수 있습니다."
                     )
 
                 except Exception as e:
