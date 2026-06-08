@@ -20,20 +20,35 @@ if plt.rcParams['font.family'][0] != 'NanumGothic':
 
 # --- 핵심 로직 함수 ---
 def run_simulation(capacity, tilt, azimuth):
-    system = pvwatts.new()
-    # 웹 서버 환경에서 날씨 파일이 없을 경우를 대비한 안전 장치 (기본 발전량 추정)
-    # 실제 오픈소스 배포 시에는 epw 파일을 서버에 함께 업로드하고 경로를 연결하는 것이 좋습니다.
-    system.value("solar_resource_data", {
-        "lat": 37.5, "lon": 127.0, "tz": 9, "elev": 100,
-        "dn": [0]*8760, "df": [0]*8760, "gh": [0]*8760, "wspd": [0]*8760, "tdry": [20]*8760
+    system = pvwatts.default("PVWattsNone")
+
+    epw_path = os.path.join(os.path.dirname(__file__), "KOR_Kangnung.471050_IWEC.epw")
+
+    system.SolarResource.assign({
+        "solar_resource_file": epw_path
     })
-    
-    # 임의 계산식 (실제 SAM 구동을 위한 더미/우회 데이터)
-    annual = capacity * 1300 * math.cos(math.radians(abs(tilt-30)/2))
-    monthly = [capacity * m * 110 for m in [0.7,0.8,0.9,1.1,1.2,1.2,1.1,1.0,0.9,0.8,0.7,0.6]]
-    
+
+    system.SystemDesign.assign({
+        "system_capacity": capacity,
+        "module_type": 0,
+        "array_type": 0,
+        "tilt": tilt,
+        "azimuth": azimuth,
+        "dc_ac_ratio": 1.1,
+        "inv_eff": 96,
+        "losses": 14.0757,
+        "gcr": 0.4
+    })
+
+    system.execute()
+
+    annual = system.Outputs.ac_annual
+    monthly = list(system.Outputs.ac_monthly)
+
     return {
-        "tilt": tilt, "azimuth": azimuth, "capacity": capacity,
+        "tilt": tilt,
+        "azimuth": azimuth,
+        "capacity": capacity,
         "annual_energy_kwh": annual,
         "ac_monthly_kwh": monthly
     }
